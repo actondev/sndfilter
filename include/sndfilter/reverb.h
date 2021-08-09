@@ -286,4 +286,7 @@ void sf_advancereverb(sf_reverb_state_st *rv,
 void sf_reverb_process(sf_reverb_state_st *state, int size, sf_sample_st *input,
 	sf_sample_st *output);
 
+// WIP pd/vst style of inputs/outputs
+void sf_reverb_process_ext(sf_reverb_state_st *rv, int size, const float *buf_inL, const float *buf_inR, float* buf_outL, float* buf_outR);
+
 #endif // SNDFILTER_REVERB__H

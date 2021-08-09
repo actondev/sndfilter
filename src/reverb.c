@@ -936,3 +936,152 @@ void sf_reverb_process(sf_reverb_state_st *rv, int size, sf_sample_st *input, sf
 		output[i] = (sf_sample_st){ outL, outR };
 	}
 }
+
+void sf_reverb_process_ext(sf_reverb_state_st *rv, int size, const float *buf_inL, const float *buf_inR, float* buf_outL, float* buf_outR){
+	// extra hardcoded constants
+	const float modnoise1 = 0.09f;
+	const float modnoise2 = 0.06f;
+	const float crossfeed = 0.4f;
+
+	// oversample buffer
+	float osL[SF_REVERB_OF], osR[SF_REVERB_OF];
+
+	for (int i = 0; i < size; i++){
+		// early reflection
+          sf_sample_st input = {.L = buf_inL[i], .R = buf_inR[i]};
+		sf_sample_st er = earlyref_step(&rv->earlyref, input);
+		float erL = er.L * rv->ertolate + input.L;
+		float erR = er.R * rv->ertolate + input.R;
+
+		// oversample the single input into multiple outputs
+		oversample_stepup(&rv->oversampleL, erL, osL);
+		oversample_stepup(&rv->oversampleR, erR, osR);
+
+		// for each oversampled sample...
+		for (int i2 = 0; i2 < rv->oversampleL.factor; i2++){
+			// dc cut
+			float outL = dccut_step(&rv->dccutL, osL[i2]);
+			float outR = dccut_step(&rv->dccutR, osR[i2]);
+
+			// noise
+			float mnoise = noise_step(&rv->noise);
+			float lfo = (lfo_step(&rv->lfo1) + modnoise1 * mnoise) * rv->wander;
+			lfo = iir1_step(&rv->lfo1_lpf, lfo);
+			mnoise *= modnoise2;
+
+			// diffusion
+			for (int i = 0, s = -1; i < 10; i++, s = -s){
+				outL = allpassm_step(&rv->diffL[i], outL, lfo * s, mnoise);
+				outR = allpassm_step(&rv->diffR[i], outR, lfo, mnoise * s);
+			}
+
+			// cross fade
+			float crossL = outL, crossR = outR;
+			for (int i = 0; i < 4; i++){
+				crossL = allpass_step(&rv->crossL[i], crossL);
+				crossR = allpass_step(&rv->crossR[i], crossR);
+			}
+			outL = iir1_step(&rv->clpfL, outL + crossfeed * crossR);
+			outR = iir1_step(&rv->clpfR, outR + crossfeed * crossL);
+
+			// bass boost
+			crossL = delay_getlast(&rv->cdelayL);
+			crossR = delay_getlast(&rv->cdelayR);
+			outL += rv->loopdecay *
+				(crossR + rv->bassb * biquad_step(&rv->basslpL, biquad_step(&rv->bassapL, crossR)));
+			outR += rv->loopdecay *
+				(crossL + rv->bassb * biquad_step(&rv->basslpR, biquad_step(&rv->bassapR, crossL)));
+
+			// dampening
+			outL = allpassm_step(&rv->dampap2L,
+				delay_step(&rv->dampdL,
+				allpassm_step(&rv->dampap1L,
+				iir1_step(&rv->damplpL, outL), lfo, mnoise)),
+				-lfo, -mnoise);
+			outR = allpassm_step(&rv->dampap2R,
+				delay_step(&rv->dampdR,
+				allpassm_step(&rv->dampap1R,
+				iir1_step(&rv->damplpR, outR), -lfo, -mnoise)),
+				lfo, mnoise);
+
+			// update cross fade bass boost delay
+			delay_step(&rv->cdelayL,
+				allpass3_step(&rv->cbassap2L,
+				delay_step(&rv->cbassd2L,
+				allpass2_step(&rv->cbassap1L,
+				delay_step(&rv->cbassd1L, outL))),
+					lfo));
+			delay_step(&rv->cdelayR,
+				allpass3_step(&rv->cbassap2R,
+				delay_step(&rv->cbassd2R,
+				allpass2_step(&rv->cbassap1R,
+				delay_step(&rv->cbassd1R, outR))),
+					-lfo));
+
+			//
+			float D1 =
+				delay_get    (&rv->cbassd1L , rv->outco[ 0]);
+			float D2 =
+				delay_get    (&rv->cbassd2L , rv->outco[ 1]) -
+				delay_get    (&rv->cbassd2R , rv->outco[ 2]) +
+				delay_get    (&rv->cbassd2L , rv->outco[ 3]) -
+				delay_get    (&rv->cdelayR  , rv->outco[ 4]) -
+				delay_get    (&rv->cbassd1R , rv->outco[ 5]) -
+				delay_get    (&rv->cbassd2R , rv->outco[ 6]);
+			float D3 =
+				delay_get    (&rv->cdelayL  , rv->outco[ 7]) +
+				allpass2_get1(&rv->cbassap1L, rv->outco[ 8]) +
+				allpass2_get2(&rv->cbassap1L, rv->outco[ 9]) -
+				allpass2_get2(&rv->cbassap1R, rv->outco[10]) +
+				allpass3_get1(&rv->cbassap2L, rv->outco[11]) +
+				allpass3_get2(&rv->cbassap2L, rv->outco[12]) +
+				allpass3_get3(&rv->cbassap2L, rv->outco[13]) -
+				allpass3_get2(&rv->cbassap2R, rv->outco[14]);
+			float D4 =
+				delay_get    (&rv->cdelayL  , rv->outco[15]);
+
+			float B1 =
+				delay_get    (&rv->cbassd1R , rv->outco[16]);
+			float B2 =
+				delay_get    (&rv->cbassd2R , rv->outco[17]) -
+				delay_get    (&rv->cbassd2L , rv->outco[18]) +
+				delay_get    (&rv->cbassd2R , rv->outco[19]) -
+				delay_get    (&rv->cdelayL  , rv->outco[20]) -
+				delay_get    (&rv->cbassd1L , rv->outco[21]) -
+				delay_get    (&rv->cbassd2L , rv->outco[22]);
+			float B3 =
+				delay_get    (&rv->cdelayR  , rv->outco[23]) +
+				allpass2_get1(&rv->cbassap1R, rv->outco[24]) +
+				allpass2_get2(&rv->cbassap1R, rv->outco[25]) -
+				allpass2_get2(&rv->cbassap1L, rv->outco[26]) +
+				allpass3_get1(&rv->cbassap2R, rv->outco[27]) +
+				allpass3_get2(&rv->cbassap2R, rv->outco[28]) +
+				allpass3_get3(&rv->cbassap2R, rv->outco[29]) -
+				allpass3_get2(&rv->cbassap2L, rv->outco[30]);
+			float B4 =
+				delay_get    (&rv->cdelayR  , rv->outco[31]);
+
+			float D = D1 * 0.469f + D2 * 0.219f + D3 * 0.064f + D4 * 0.045f;
+			float B = B1 * 0.469f + B2 * 0.219f + B3 * 0.064f + B4 * 0.045f;
+
+			lfo = iir1_step(&rv->lfo2_lpf, lfo_step(&rv->lfo2) * rv->wander);
+			outL = comb_step(&rv->combL, D, lfo);
+			outR = comb_step(&rv->combR, B, -lfo);
+
+			outL = delay_step(&rv->lastdelayL, biquad_step(&rv->lastlpfL, outL));
+			outR = delay_step(&rv->lastdelayR, biquad_step(&rv->lastlpfR, outR));
+
+			osL[i2] = outL * rv->wet1 + outR * rv->wet2 +
+				delay_step(&rv->inpdelayL, osL[i2]) * rv->dry;
+			osR[i2] = outR * rv->wet1 + outL * rv->wet2 +
+				delay_step(&rv->inpdelayR, osR[i2]) * rv->dry;
+		}
+
+		float outL = oversample_stepdown(&rv->oversampleL, osL);
+		float outR = oversample_stepdown(&rv->oversampleR, osR);
+		outL += er.L * rv->erefwet + input.L * rv->dry;
+		outR += er.R * rv->erefwet + input.R * rv->dry;
+                buf_outL[i] = outL;
+                buf_outR[i] = outR;
+	}
+}
