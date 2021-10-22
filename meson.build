@@ -6,6 +6,9 @@ project(
 sndfilter_lib = library(
   'sndfilter',
   include_directories: include_directories('include'),
+  c_args: [
+    '-D_USE_MATH_DEFINES' # M_PI, M_LN2
+  ],
   sources: files(
     'src/biquad.c',
     'src/compressor.c',
